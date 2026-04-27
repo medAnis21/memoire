@@ -1,6 +1,11 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 session_start();
 include "../include/db.php";
+
+$login_error = '';
 
 /* REGISTER */
 if(isset($_POST['register'])) {
@@ -55,11 +60,11 @@ if(isset($_POST['login'])) {
         if ($user['role'] === 'admin') {
             header("Location: ../admin/dashboard.php");
         } else {
-            header("Location: ../user/dashboard.php");
+            header("Location: ../client/index.php");
         }
         exit();
     } else {
-        echo "Invalid username or password";
+        $login_error = 'Email or Password Incorect';
     }
 }
 ?>
@@ -69,11 +74,20 @@ if(isset($_POST['login'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login/Signup Form</title>
-    <link rel="stylesheet" href="SignUp_LogIn_Form.css">
-    <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
+        <link rel="stylesheet" href="../client/style.css">
+        <link rel="stylesheet" href="SignUp_LogIn_Form.css">
+        <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
 </head>
-  <body>
-      <div class="container">
+    <body>
+                <nav>
+                    <a href="../client/index.php" class="nav-logo">
+                        <span class="nav-logo-text">SONATRACH</span>
+                    </a>
+                    <ul class="nav-links" id="navLinks">
+                        <li><a href="../client/index.php" class="nav-cta">Home</a></li>
+                    </ul>
+                </nav>
+        <div class="container">
           <div class="form-box login">
               <form action="" method="post">
                   <h1>Login</h1>
@@ -86,9 +100,12 @@ if(isset($_POST['login'])) {
                       <i class='bx bxs-lock-alt' ></i>
                   </div>
                   <div class="forgot-link">
-                      <a href="#">Forgot Password?</a>
+                      <a href="forgot.php">Forgot Password?</a>
                   </div>
                   <button type="submit" name="login" class="btn">Login</button>
+                  <?php if (!empty($login_error)): ?>
+                  <div class="error-message"><?php echo htmlspecialchars($login_error); ?></div>
+                  <?php endif; ?>
               </form>
           </div>
 
@@ -130,6 +147,7 @@ if(isset($_POST['login'])) {
           </div>
       </div>
 
-      <script src="SignUp_LogIn_Form.js"></script>
+            <script src="../client/script.js"></script>
+            <script src="SignUp_LogIn_Form.js"></script>
   </body>
 </html>
