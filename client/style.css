@@ -199,6 +199,7 @@ nav {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
+  margin-bottom: 80px;
 }
 
 .btn-primary {
