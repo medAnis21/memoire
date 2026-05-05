@@ -5,44 +5,50 @@ error_reporting(E_ALL);
 session_start();
 include "../include/db.php";
 
-$login_error = '';
+$login_error    = '';
+$register_error = '';
+$register_success = '';
 
 /* REGISTER */
-if(isset($_POST['register'])) {
+if (isset($_POST['register'])) {
 
     $username = trim($_POST['register_username']);
     $email    = trim($_POST['register_email']);
 
     if ($_POST['register_password'] !== $_POST['register_confirm_password']) {
-        die("Passwords do not match");
+        $register_error = 'Passwords do not match.';
+    } else {
+        $password = password_hash($_POST['register_password'], PASSWORD_DEFAULT);
+
+        // Check username
+        $chkU = $conn->prepare("SELECT id FROM users WHERE username = :u");
+        $chkU->execute([':u' => $username]);
+        if ($chkU->rowCount() > 0) {
+            $register_error = 'Username already taken, please choose another.';
+        } else {
+            // Check email
+            $chkE = $conn->prepare("SELECT id FROM users WHERE email = :e");
+            $chkE->execute([':e' => $email]);
+            if ($chkE->rowCount() > 0) {
+                $register_error = 'Email already registered.';
+            } else {
+                $stmt = $conn->prepare("
+                    INSERT INTO users (username, email, password, role)
+                    VALUES (:username, :email, :password, 'user')
+                ");
+                $stmt->execute([
+                    ':username' => $username,
+                    ':email'    => $email,
+                    ':password' => $password,
+                ]);
+                $register_success = 'Registration successful! You can now login.';
+            }
+        }
     }
-
-    $password = password_hash($_POST['register_password'], PASSWORD_DEFAULT);
-
-    // Check if email already exists
-    $check = $conn->prepare("SELECT id FROM users WHERE email = :email");
-    $check->execute([':email' => $email]);
-
-    if ($check->rowCount() > 0) {
-        die("Email already exists");
-    }
-
-    // New registrations are always 'user' role (not admin)
-    $stmt = $conn->prepare("
-        INSERT INTO users (username, email, password, role)
-        VALUES (:username, :email, :password, 'user')
-    ");
-    $stmt->execute([
-        ':username' => $username,
-        ':email'    => $email,
-        ':password' => $password
-    ]);
-
-    echo "Registration successful";
 }
 
 /* LOGIN */
-if(isset($_POST['login'])) {
+if (isset($_POST['login'])) {
 
     $username = trim($_POST['login_username']);
     $password = $_POST['login_password'];
@@ -54,9 +60,8 @@ if(isset($_POST['login'])) {
     if ($user && password_verify($password, $user['password'])) {
         $_SESSION['user_id']  = $user['id'];
         $_SESSION['username'] = $user['username'];
-        $_SESSION['role']     = $user['role'];  // 'admin' or 'user'
+        $_SESSION['role']     = $user['role'];
 
-        // Redirect based on role
         if ($user['role'] === 'admin') {
             header("Location: ../admin/dashboard.php");
         } else {
@@ -64,7 +69,7 @@ if(isset($_POST['login'])) {
         }
         exit();
     } else {
-        $login_error = 'Email or Password Incorect';
+        $login_error = 'Incorrect username or password.';
     }
 }
 ?>
@@ -74,80 +79,92 @@ if(isset($_POST['login'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login/Signup Form</title>
-        <link rel="stylesheet" href="../client/style.css">
-        <link rel="stylesheet" href="SignUp_LogIn_Form.css">
-        <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
+    <link rel="stylesheet" href="../client/style.css">
+    <link rel="stylesheet" href="SignUp_LogIn_Form.css">
+    <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
 </head>
-    <body>
-                <nav>
-                    <a href="../client/index.php" class="nav-logo">
-                        <span class="nav-logo-text">SONATRACH</span>
-                    </a>
-                    <ul class="nav-links" id="navLinks">
-                        <li><a href="../client/index.php" class="nav-cta">Home</a></li>
-                    </ul>
-                </nav>
-        <div class="container">
-          <div class="form-box login">
-              <form action="" method="post">
-                  <h1>Login</h1>
-                  <div class="input-box">
-                      <input type="text" name="login_username" placeholder="Username" required>
-                      <i class='bx bxs-user'></i>
-                  </div>
-                  <div class="input-box">
-                      <input type="password" name="login_password" placeholder="Password" required>
-                      <i class='bx bxs-lock-alt' ></i>
-                  </div>
-                  <div class="forgot-link">
-                      <a href="forgot.php">Forgot Password?</a>
-                  </div>
-                  <button type="submit" name="login" class="btn">Login</button>
-                  <?php if (!empty($login_error)): ?>
-                  <div class="error-message"><?php echo htmlspecialchars($login_error); ?></div>
-                  <?php endif; ?>
-              </form>
-          </div>
+<body>
+    <nav>
+        <a href="../client/index.php" class="nav-logo">
+            <span class="nav-logo-text">SONATRACH</span>
+        </a>
+        <ul class="nav-links" id="navLinks">
+            <li><a href="../client/index.php" class="nav-cta">Home</a></li>
+        </ul>
+    </nav>
 
-          <div class="form-box register">
-              <form action="" method="post">
-                  <h1>Registration</h1>
-                  <div class="input-box">
-                      <input type="text" name="register_username" placeholder="Username" required>
-                      <i class='bx bxs-user'></i>
-                  </div>
-                  <div class="input-box">
-                      <input type="email" name="register_email" placeholder="Email" required>
-                      <i class='bx bxs-envelope' ></i>
-                  </div>
-                  <div class="input-box">
-                      <input type="password" name="register_password" placeholder="Password" required>
-                      <i class='bx bxs-lock-alt' ></i>
-                  </div>
-                  <div class="input-box">
-                      <input type="password" name="register_confirm_password" placeholder="Confirm Password" required>
-                      <i class='bx bxs-lock-alt' ></i>
-                  </div>
-                  <button type="submit" name="register" class="btn">Register</button>
-              </form>
-          </div>
+    <div class="container <?= ($register_error || $register_success) ? 'active' : '' ?>">
 
-          <div class="toggle-box">
-              <div class="toggle-panel toggle-left">
-                  <h1>Welcome Back!</h1>
-                  <p>Don't have an account?</p>
-                  <button class="btn register-btn">Register</button>
-              </div>
+        <!-- LOGIN FORM -->
+        <div class="form-box login">
+            <form action="" method="post">
+                <h1>Login</h1>
+                <div class="input-box">
+                    <input type="text" name="login_username" placeholder="Username" required>
+                    <i class='bx bxs-user'></i>
+                </div>
+                <div class="input-box">
+                    <input type="password" name="login_password" placeholder="Password" required>
+                    <i class='bx bxs-lock-alt'></i>
+                </div>
+                <div class="forgot-link">
+                    <a href="forgot.php">Forgot Password?</a>
+                </div>
+                <button type="submit" name="login" class="btn">Login</button>
+                <?php if (!empty($login_error)): ?>
+                    <div class="error-message"><?= htmlspecialchars($login_error) ?></div>
+                <?php endif; ?>
+            </form>
+        </div>
 
-              <div class="toggle-panel toggle-right">
-                  <h1>Hello, Welcome!</h1>
-                  <p>Already have an account?</p>
-                  <button class="btn login-btn">Login</button>
-              </div>
-          </div>
-      </div>
+        <!-- REGISTER FORM -->
+        <div class="form-box register">
+            <form action="" method="post">
+                <h1>Registration</h1>
+                <div class="input-box">
+                    <input type="text" name="register_username" placeholder="Username" required>
+                    <i class='bx bxs-user'></i>
+                </div>
+                <div class="input-box">
+                    <input type="email" name="register_email" placeholder="Email" required>
+                    <i class='bx bxs-envelope'></i>
+                </div>
+                <div class="input-box">
+                    <input type="password" name="register_password" placeholder="Password" required>
+                    <i class='bx bxs-lock-alt'></i>
+                </div>
+                <div class="input-box">
+                    <input type="password" name="register_confirm_password" placeholder="Confirm Password" required>
+                    <i class='bx bxs-lock-alt'></i>
+                </div>
+                <button type="submit" name="register" class="btn">Register</button>
+                <?php if (!empty($register_error)): ?>
+                    <div class="error-message"><?= htmlspecialchars($register_error) ?></div>
+                <?php endif; ?>
+                <?php if (!empty($register_success)): ?>
+                    <div class="error-message" style="color:#2e7d32;background:rgba(46,125,50,0.08);border-color:rgba(46,125,50,0.2);">
+                        <?= htmlspecialchars($register_success) ?>
+                    </div>
+                <?php endif; ?>
+            </form>
+        </div>
 
-            <script src="../client/script.js"></script>
-            <script src="SignUp_LogIn_Form.js"></script>
-  </body>
+        <!-- TOGGLE -->
+        <div class="toggle-box">
+            <div class="toggle-panel toggle-left">
+                <h1>Welcome Back!</h1>
+                <p>Don't have an account?</p>
+                <button class="btn register-btn">Register</button>
+            </div>
+            <div class="toggle-panel toggle-right">
+                <h1>Hello, Welcome!</h1>
+                <p>Already have an account?</p>
+                <button class="btn login-btn">Login</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="../client/script.js"></script>
+    <script src="SignUp_LogIn_Form.js"></script>
+</body>
 </html>
