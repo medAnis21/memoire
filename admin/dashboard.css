@@ -492,6 +492,18 @@ tr:hover { background: rgba(200,148,42,.04); }
 .btn-accept:hover { background: rgba(58,175,110,.12); border-color: rgba(58,175,110,.4); }
 .btn-reject { color: var(--c-rejected); }
 .btn-reject:hover { background: rgba(192,57,43,.12); border-color: rgba(192,57,43,.4); }
+.btn-delete {
+  color: #fff;
+  background: #c0392b;
+  border-color: #c0392b !important;
+  box-shadow: 0 2px 8px rgba(192,57,43,.4);
+}
+.btn-delete:hover {
+  background: #a93226;
+  border-color: #a93226 !important;
+  box-shadow: 0 4px 14px rgba(192,57,43,.55);
+  transform: translateY(-1px);
+}
 
 /* ── PAGINATION ────────────────────────────────────────────── */
 .pagination {

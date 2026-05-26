@@ -26,17 +26,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt = $conn->prepare("UPDATE stagaires SET status=:s, admin_notes=:n WHERE id=:id");
             $stmt->execute([':s' => $status, ':n' => $notes, ':id' => $id]);
 
-            // On acceptance, optionally e-mail branch manager
-            if ($status === 'accepted') {
-                $row = $conn->prepare("SELECT s.*, bq.manager_email, bq.manager_name FROM stagaires s LEFT JOIN branch_quotas bq ON bq.branch=s.branch WHERE s.id=:id");
-                $row->execute([':id' => $id]);
-                $r = $row->fetch(PDO::FETCH_ASSOC);
-                if ($r && $r['manager_email']) {
+            // ── Sync branch_stagaires table ──────────────────────────────
+            // Fetch stagaire branch info
+            $rowInfo = $conn->prepare("SELECT s.*, bq.manager_email, bq.manager_name FROM stagaires s LEFT JOIN branch_quotas bq ON bq.branch=s.branch WHERE s.id=:id");
+            $rowInfo->execute([':id' => $id]);
+            $r = $rowInfo->fetch(PDO::FETCH_ASSOC);
+
+            if ($status === 'accepted' && $r) {
+                // إضافة المتربص إلى جدول branch_stagaires إن لم يكن موجوداً
+                $ins = $conn->prepare("
+                    INSERT IGNORE INTO branch_stagaires (branch_code, stagaire_id, accepted_at, notes)
+                    VALUES (:branch, :sid, NOW(), :notes)
+                ");
+                $ins->execute([
+                    ':branch' => $r['branch'],
+                    ':sid'    => $id,
+                    ':notes'  => $notes ?: null,
+                ]);
+
+                // إرسال بريد إلكتروني إلى مسؤول الفرع
+                if ($r['manager_email']) {
                     $subj = "[Sonatrach] Nouveau stagaire accepté – " . $r['branch'];
                     $body = "Bonjour {$r['manager_name']},\n\nUn nouveau stagaire a été accepté pour votre branche {$r['branch']}.\n\nNom : {$r['first_name']} {$r['last_name']}\nUniversité : {$r['university']}\nSpécialité : {$r['speciality']}\nEmail : {$r['email']}\nTél : {$r['phone']}\n\nCordialement,\nAdministration Sonatrach";
                     @mail($r['manager_email'], $subj, $body, "From: admin@sonatrach.dz\r\nContent-Type: text/plain; charset=utf-8\r\n");
                 }
+            } elseif ($status === 'rejected' || $status === 'pending') {
+                // حذف المتربص من branch_stagaires عند الرفض أو إعادته لـ pending
+                $del = $conn->prepare("DELETE FROM branch_stagaires WHERE stagaire_id = :sid");
+                $del->execute([':sid' => $id]);
             }
+            // ────────────────────────────────────────────────────────────
+
             $flash = ['type'=>'success','msg'=>'Statut mis à jour avec succès.'];
         }
     }
@@ -56,6 +76,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':q2'=>$quota,':me2'=>$mgr_email,':mn2'=>$mgr_name
             ]);
             $flash = ['type'=>'success','msg'=>"Quota de la branche $branch mis à jour."];
+        }
+    }
+
+    /* ── حذف متربص مرفوض ونقله إلى deleted_stagaires ── */
+    if ($action === 'delete_stagaire') {
+        $id = (int)($_POST['id'] ?? 0);
+        if ($id) {
+            // جلب بيانات المتربص قبل الحذف
+            $fetch = $conn->prepare("SELECT * FROM stagaires WHERE id = :id");
+            $fetch->execute([':id' => $id]);
+            $row = $fetch->fetch(PDO::FETCH_ASSOC);
+
+            if ($row) {
+                // نسخ البيانات إلى جدول deleted_stagaires
+                $arch = $conn->prepare("
+                    INSERT INTO deleted_stagaires
+                        (original_id, user_id, first_name, last_name, branch, university,
+                         speciality, email, phone, status_before_delete, admin_notes,
+                         national_id_card_path, self_photo_path, birth_certificate_path,
+                         submitted_at, deleted_at, deleted_by)
+                    VALUES
+                        (:oid, :uid, :fn, :ln, :br, :uni,
+                         :sp, :em, :ph, :st, :an,
+                         :idp, :spp, :bcp,
+                         :sub, NOW(), :dby)
+                ");
+                $arch->execute([
+                    ':oid' => $row['id'],
+                    ':uid' => $row['user_id'],
+                    ':fn'  => $row['first_name'],
+                    ':ln'  => $row['last_name'],
+                    ':br'  => $row['branch'],
+                    ':uni' => $row['university'],
+                    ':sp'  => $row['speciality'],
+                    ':em'  => $row['email'],
+                    ':ph'  => $row['phone'],
+                    ':st'  => $row['status'] ?? 'rejected',
+                    ':an'  => $row['admin_notes'],
+                    ':idp' => $row['national_id_card_path'],
+                    ':spp' => $row['self_photo_path'],
+                    ':bcp' => $row['birth_certificate_path'],
+                    ':sub' => $row['created_at'],
+                    ':dby' => $_SESSION['username'] ?? 'admin',
+                ]);
+
+                // حذف من branch_stagaires إن وُجد
+                $conn->prepare("DELETE FROM branch_stagaires WHERE stagaire_id = :id")
+                     ->execute([':id' => $id]);
+
+                // حذف من stagaires
+                $conn->prepare("DELETE FROM stagaires WHERE id = :id")
+                     ->execute([':id' => $id]);
+
+                $flash = ['type'=>'success','msg'=>'Stagaire supprimé et archivé avec succès.'];
+            } else {
+                $flash = ['type'=>'error','msg'=>'Stagaire introuvable.'];
+            }
         }
     }
 
@@ -123,6 +200,17 @@ $branchSummary = $conn->query("
 
 // All quotas (including branches with 0 stagaires)
 $allQuotas = $conn->query("SELECT * FROM branch_quotas ORDER BY branch")->fetchAll(PDO::FETCH_ASSOC);
+
+// بيانات branch_stagaires — عدد المقبولين الفعليين لكل فرع
+$bsStats = $conn->query("
+    SELECT br.code AS branch,
+           br.label,
+           COUNT(bs.stagaire_id) AS accepted_count
+    FROM   branches br
+    LEFT JOIN branch_stagaires bs ON bs.branch_code = br.code
+    GROUP  BY br.code, br.label
+    ORDER  BY br.code
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $branches = ['CP2K','CP1K','GL1K','RA1K','RA2K','GL1Z','GL2Z','GP1Z','GNL'];
 
@@ -404,6 +492,17 @@ function buildQuery(array $merge = [], array $remove = []): string {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                   </button>
                   <?php endif; ?>
+                  <?php if ($s['status'] === 'rejected'): ?>
+                  <button class="btn-action btn-delete" title="Supprimer définitivement" onclick="openDelete(<?= $s['id'] ?>, '<?= htmlspecialchars(addslashes($s['first_name'].' '.$s['last_name'])) ?>')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19,6l-1,14a2,2,0,0,1-2,2H8a2,2,0,0,1-2-2L5,6"/>
+                      <path d="M10,11v6"/>
+                      <path d="M14,11v6"/>
+                      <path d="M9,6V4a1,1,0,0,1,1-1h4a1,1,0,0,1,1,1V6"/>
+                    </svg>
+                  </button>
+                  <?php endif; ?>
                 </div>
               </td>
             </tr>
@@ -427,6 +526,44 @@ function buildQuery(array $merge = [], array $remove = []): string {
       </div>
       <?php endif; ?>
       <?php endif; ?>
+    </section>
+
+    <!-- BRANCH STAGAIRES TABLE -->
+    <section class="quotas-section" id="branch-stagaires-section">
+      <div class="section-header">
+        <h2>Stagaires acceptés par branche</h2>
+        <span class="result-count" style="font-size:.78rem;color:var(--text-muted);">branch_stagaires</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code branche</th>
+              <th>Nom de la branche</th>
+              <th>Stagaires acceptés</th>
+              <th>Détails</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($bsStats as $bs): ?>
+            <tr>
+              <td><span class="branch-pill"><?= htmlspecialchars($bs['branch']) ?></span></td>
+              <td><?= htmlspecialchars($bs['label']) ?></td>
+              <td>
+                <strong style="color:var(--gold);font-size:1.1rem;"><?= $bs['accepted_count'] ?></strong>
+              </td>
+              <td>
+                <a href="dashboard.php?branch=<?= urlencode($bs['branch']) ?>&status=accepted"
+                   class="btn-action btn-view" style="display:inline-flex;align-items:center;gap:.4rem;padding:.4rem .8rem;font-size:.78rem;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  Voir
+                </a>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- QUOTAS & BRANCH MANAGERS -->
@@ -484,6 +621,51 @@ function buildQuery(array $merge = [], array $remove = []): string {
   </div>
 </div>
 
+<!-- DELETE MODAL -->
+<div class="modal-overlay" id="deleteOverlay" onclick="closeModals()">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeModals()">✕</button>
+    <div style="text-align:center;padding:.5rem 0 1.25rem;">
+      <!-- Animated trash icon -->
+      <div style="display:inline-flex;align-items:center;justify-content:center;width:72px;height:72px;border-radius:50%;background:rgba(192,57,43,.12);border:2px solid rgba(192,57,43,.3);margin-bottom:1rem;">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#c0392b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3,6 5,6 21,6"/>
+          <path d="M19,6l-1,14a2,2,0,0,1-2,2H8a2,2,0,0,1-2-2L5,6"/>
+          <path d="M10,11v6"/>
+          <path d="M14,11v6"/>
+          <path d="M9,6V4a1,1,0,0,1,1-1h4a1,1,0,0,1,1,1V6"/>
+        </svg>
+      </div>
+      <h3 style="margin-bottom:.6rem;color:var(--text-primary);font-size:1.15rem;">Supprimer définitivement ?</h3>
+      <p style="color:var(--text-muted);font-size:.88rem;line-height:1.7;">
+        Le stagaire <strong id="deleteNameLabel" style="color:var(--text-primary);"></strong> sera supprimé du système
+        et archivé dans le registre des suppressions.<br>
+        <span style="color:#c0392b;font-weight:600;">Cette action est irréversible.</span>
+      </p>
+    </div>
+    <form method="post" id="deleteForm">
+      <input type="hidden" name="action" value="delete_stagaire"/>
+      <input type="hidden" name="id" id="deleteId"/>
+      <div style="display:flex;gap:.75rem;margin-top:.5rem;">
+        <button type="button" onclick="closeModals()"
+          style="flex:1;padding:.75rem;border-radius:var(--radius);border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;font-family:inherit;font-weight:600;transition:.2s;">
+          Annuler
+        </button>
+        <button type="submit"
+          style="flex:1;padding:.75rem;border-radius:var(--radius);border:none;background:#c0392b;color:#fff;cursor:pointer;font-family:inherit;font-weight:700;box-shadow:0 4px 16px rgba(192,57,43,.4);display:inline-flex;align-items:center;justify-content:center;gap:.5rem;transition:.2s;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3,6 5,6 21,6"/>
+            <path d="M19,6l-1,14a2,2,0,0,1-2,2H8a2,2,0,0,1-2-2L5,6"/>
+            <path d="M10,11v6"/><path d="M14,11v6"/>
+            <path d="M9,6V4a1,1,0,0,1,1-1h4a1,1,0,0,1,1,1V6"/>
+          </svg>
+          Supprimer
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- REJECT MODAL -->
 <div class="modal-overlay" id="rejectOverlay" onclick="closeModals()">
   <div class="modal modal-sm" onclick="event.stopPropagation()">
@@ -499,6 +681,15 @@ function buildQuery(array $merge = [], array $remove = []): string {
       </div>
       <button type="submit" class="quota-save-btn" style="background:#c0392b;box-shadow:0 4px 16px rgba(192,57,43,.3);">Confirmer le rejet</button>
     </form>
+    <div style="margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--border);text-align:center;">
+      <p style="font-size:.78rem;color:var(--text-muted);margin-bottom:.6rem;">Ou rejeter et supprimer immédiatement</p>
+      <button id="rejectAndDeleteBtn" type="button"
+        style="width:100%;padding:.65rem;border-radius:var(--radius);border:1px solid rgba(192,57,43,.4);background:rgba(192,57,43,.08);color:#e07070;cursor:pointer;font-family:inherit;font-weight:700;font-size:.85rem;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;"
+        onclick="rejectThenDelete()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3,6 5,6 21,6"/><path d="M19,6l-1,14a2,2,0,0,1-2,2H8a2,2,0,0,1-2-2L5,6"/><path d="M10,11v6"/><path d="M14,11v6"/><path d="M9,6V4a1,1,0,0,1,1-1h4a1,1,0,0,1,1,1V6"/></svg>
+        Rejeter &amp; Supprimer
+      </button>
+    </div>
   </div>
 </div>
 
@@ -558,6 +749,7 @@ function openDetail(id) {
     <div class="detail-actions">
       ${s.status !== 'accepted' ? `<form method="post" onsubmit="return confirm('Accepter ?')"><input type="hidden" name="action" value="set_status"/><input type="hidden" name="id" value="${id}"/><input type="hidden" name="status" value="accepted"/><button class="quota-save-btn">✓ Accepter</button></form>` : ''}
       ${s.status !== 'rejected' ? `<button class="quota-save-btn" style="background:#c0392b;box-shadow:0 4px 16px rgba(192,57,43,.3);" onclick="closeModals();openReject(${id})">✕ Rejeter</button>` : ''}
+      ${s.status === 'rejected' ? `<button class="quota-save-btn" style="background:#6b2121;box-shadow:0 4px 16px rgba(107,33,33,.35);display:inline-flex;align-items:center;gap:.5rem;" onclick="closeModals();openDelete(${id},'${s.name}')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3,6 5,6 21,6"/><path d="M19,6l-1,14a2,2,0,0,1-2,2H8a2,2,0,0,1-2-2L5,6"/><path d="M10,11v6"/><path d="M14,11v6"/><path d="M9,6V4a1,1,0,0,1,1-1h4a1,1,0,0,1,1,1V6"/></svg> Supprimer</button>` : ''}
     </div>
   `;
   document.getElementById('detailOverlay').classList.add('open');
@@ -566,6 +758,31 @@ function openDetail(id) {
 function openReject(id) {
   document.getElementById('rejectId').value = id;
   document.getElementById('rejectOverlay').classList.add('open');
+}
+
+function openDelete(id, name) {
+  document.getElementById('deleteId').value = id;
+  document.getElementById('deleteNameLabel').textContent = name;
+  document.getElementById('deleteOverlay').classList.add('open');
+}
+
+// Rejeter + supprimer : soumettre directement un formulaire de suppression
+function rejectThenDelete() {
+  const id = document.getElementById('rejectId').value;
+  const notes = document.querySelector('#rejectForm textarea[name="notes"]').value;
+  if (!id) return;
+
+  // Créer un formulaire de suppression avec les notes du rejet
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.innerHTML = `
+    <input type="hidden" name="action" value="delete_stagaire">
+    <input type="hidden" name="id" value="${id}">
+    <input type="hidden" name="notes" value="${notes}">
+  `;
+  document.body.appendChild(form);
+  closeModals();
+  form.submit();
 }
 
 function closeModals() {
